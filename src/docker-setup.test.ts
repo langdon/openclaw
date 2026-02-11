@@ -38,6 +38,39 @@ exit 0
   await writeFile(logPath, "");
 }
 
+async function writePodmanStub(binDir: string, logPath: string) {
+  const stub = `#!/usr/bin/env bash
+set -euo pipefail
+log="$DOCKER_STUB_LOG"
+if [[ "\${1:-}" == "compose" && "\${2:-}" == "version" ]]; then
+  exit 0
+fi
+if [[ "\${1:-}" == "build" ]]; then
+  echo "build $*" >>"$log"
+  exit 0
+fi
+if [[ "\${1:-}" == "compose" ]]; then
+  echo "compose $*" >>"$log"
+  exit 0
+fi
+echo "unknown $*" >>"$log"
+exit 0
+`;
+
+  await mkdir(binDir, { recursive: true });
+  await writeFile(join(binDir, "podman"), stub, { mode: 0o755 });
+  await writeFile(logPath, "");
+}
+
+async function writeGetenforceStub(binDir: string, mode: string) {
+  const stub = `#!/usr/bin/env bash
+set -euo pipefail
+echo "${mode}"
+`;
+  await mkdir(binDir, { recursive: true });
+  await writeFile(join(binDir, "getenforce"), stub, { mode: 0o755 });
+}
+
 async function createDockerSetupSandbox(): Promise<DockerSetupSandbox> {
   const rootDir = await mkdtemp(join(tmpdir(), "openclaw-docker-setup-"));
   const scriptPath = join(rootDir, "docker-setup.sh");
@@ -186,5 +219,41 @@ describe("docker-setup.sh", () => {
     const compose = await readFile(join(repoRoot, "docker-compose.yml"), "utf8");
     expect(compose).not.toContain("gateway-daemon");
     expect(compose).toContain('"gateway"');
+  });
+
+  it("supports Podman compose and writes SELinux bind options", async () => {
+    const sandbox = await createDockerSetupSandbox();
+    await writePodmanStub(sandbox.binDir, sandbox.logPath);
+    await writeGetenforceStub(sandbox.binDir, "Enforcing");
+    const env = createEnv(sandbox, {
+      OPENCLAW_CONTAINER_ENGINE: "podman",
+      OPENCLAW_EXTRA_MOUNTS: "",
+      OPENCLAW_HOME_VOLUME: join(sandbox.rootDir, "home"),
+    });
+
+    const result = spawnSync("bash", [sandbox.scriptPath], {
+      cwd: sandbox.rootDir,
+      env,
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(0);
+
+    const envFile = await readFile(join(sandbox.rootDir, ".env"), "utf8");
+    expect(envFile).toContain("OPENCLAW_CONTAINER_ENGINE=podman");
+    if (process.platform === "linux") {
+      expect(envFile).toContain("OPENCLAW_BIND_MOUNT_OPTIONS=:Z");
+    }
+
+    const log = await readFile(sandbox.logPath, "utf8");
+    expect(log).toContain("compose compose");
+    expect(log).toContain("run --rm openclaw-cli onboard --no-install-daemon");
+    expect(log).toContain("up -d openclaw-gateway");
+
+    if (process.platform === "linux") {
+      const extraCompose = await readFile(join(sandbox.rootDir, "docker-compose.extra.yml"), "utf8");
+      expect(extraCompose).toContain(":/home/node:Z");
+      expect(extraCompose).toContain(":/home/node/.openclaw:Z");
+    }
   });
 });

@@ -7,6 +7,7 @@ EXTRA_COMPOSE_FILE="$ROOT_DIR/docker-compose.extra.yml"
 IMAGE_NAME="${OPENCLAW_IMAGE:-openclaw:local}"
 EXTRA_MOUNTS="${OPENCLAW_EXTRA_MOUNTS:-}"
 HOME_VOLUME_NAME="${OPENCLAW_HOME_VOLUME:-}"
+ENGINE_SETTING="${OPENCLAW_CONTAINER_ENGINE:-}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -15,14 +16,64 @@ require_cmd() {
   fi
 }
 
-require_cmd docker
-if ! docker compose version >/dev/null 2>&1; then
-  echo "Docker Compose not available (try: docker compose version)" >&2
+CONTAINER_ENGINE=""
+if [[ -n "$ENGINE_SETTING" ]]; then
+  case "$ENGINE_SETTING" in
+    docker | podman) CONTAINER_ENGINE="$ENGINE_SETTING" ;;
+    *)
+      echo "OPENCLAW_CONTAINER_ENGINE must be 'docker' or 'podman' (got: $ENGINE_SETTING)" >&2
+      exit 1
+      ;;
+  esac
+elif command -v docker >/dev/null 2>&1; then
+  CONTAINER_ENGINE="docker"
+elif command -v podman >/dev/null 2>&1; then
+  CONTAINER_ENGINE="podman"
+else
+  echo "Missing dependency: docker or podman" >&2
   exit 1
+fi
+
+require_cmd "$CONTAINER_ENGINE"
+
+COMPOSE_CMD=()
+COMPOSE_HINT=""
+if [[ "$CONTAINER_ENGINE" == "docker" ]]; then
+  if ! docker compose version >/dev/null 2>&1; then
+    echo "Docker Compose not available (try: docker compose version)" >&2
+    exit 1
+  fi
+  COMPOSE_CMD=(docker compose)
+  COMPOSE_HINT="docker compose"
+else
+  if podman compose version >/dev/null 2>&1; then
+    COMPOSE_CMD=(podman compose)
+    COMPOSE_HINT="podman compose"
+  elif command -v podman-compose >/dev/null 2>&1; then
+    COMPOSE_CMD=(podman-compose)
+    COMPOSE_HINT="podman-compose"
+  else
+    echo "Podman Compose not available (install podman compose plugin or podman-compose)" >&2
+    exit 1
+  fi
 fi
 
 OPENCLAW_CONFIG_DIR="${OPENCLAW_CONFIG_DIR:-$HOME/.openclaw}"
 OPENCLAW_WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-$HOME/.openclaw/workspace}"
+OPENCLAW_BIND_MOUNT_OPTIONS="${OPENCLAW_BIND_MOUNT_OPTIONS:-}"
+
+if [[ -z "$OPENCLAW_BIND_MOUNT_OPTIONS" && "$CONTAINER_ENGINE" == "podman" ]]; then
+  os_name="$(uname -s 2>/dev/null || echo unknown)"
+  if [[ "$os_name" == "Linux" ]]; then
+    selinux_mode=""
+    if command -v getenforce >/dev/null 2>&1; then
+      selinux_mode="$(getenforce 2>/dev/null || true)"
+    fi
+    if [[ "$selinux_mode" == "Enforcing" || "$selinux_mode" == "Permissive" ]]; then
+      OPENCLAW_BIND_MOUNT_OPTIONS=":Z"
+    fi
+  fi
+fi
 
 mkdir -p "$OPENCLAW_CONFIG_DIR"
 mkdir -p "$OPENCLAW_WORKSPACE_DIR"
@@ -36,6 +87,8 @@ export OPENCLAW_IMAGE="$IMAGE_NAME"
 export OPENCLAW_DOCKER_APT_PACKAGES="${OPENCLAW_DOCKER_APT_PACKAGES:-}"
 export OPENCLAW_EXTRA_MOUNTS="$EXTRA_MOUNTS"
 export OPENCLAW_HOME_VOLUME="$HOME_VOLUME_NAME"
+export OPENCLAW_CONTAINER_ENGINE="$CONTAINER_ENGINE"
+export OPENCLAW_BIND_MOUNT_OPTIONS="$OPENCLAW_BIND_MOUNT_OPTIONS"
 
 if [[ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]]; then
   if command -v openssl >/dev/null 2>&1; then
@@ -57,6 +110,7 @@ write_extra_compose() {
   local home_volume="$1"
   shift
   local mount
+  local home_mount
 
   cat >"$EXTRA_COMPOSE_FILE" <<'YAML'
 services:
@@ -65,9 +119,13 @@ services:
 YAML
 
   if [[ -n "$home_volume" ]]; then
-    printf '      - %s:/home/node\n' "$home_volume" >>"$EXTRA_COMPOSE_FILE"
-    printf '      - %s:/home/node/.openclaw\n' "$OPENCLAW_CONFIG_DIR" >>"$EXTRA_COMPOSE_FILE"
-    printf '      - %s:/home/node/.openclaw/workspace\n' "$OPENCLAW_WORKSPACE_DIR" >>"$EXTRA_COMPOSE_FILE"
+    home_mount="${home_volume}:/home/node"
+    if [[ "$home_volume" == *"/"* ]]; then
+      home_mount+="$OPENCLAW_BIND_MOUNT_OPTIONS"
+    fi
+    printf '      - %s\n' "$home_mount" >>"$EXTRA_COMPOSE_FILE"
+    printf '      - %s:/home/node/.openclaw%s\n' "$OPENCLAW_CONFIG_DIR" "$OPENCLAW_BIND_MOUNT_OPTIONS" >>"$EXTRA_COMPOSE_FILE"
+    printf '      - %s:/home/node/.openclaw/workspace%s\n' "$OPENCLAW_WORKSPACE_DIR" "$OPENCLAW_BIND_MOUNT_OPTIONS" >>"$EXTRA_COMPOSE_FILE"
   fi
 
   for mount in "$@"; do
@@ -80,9 +138,13 @@ YAML
 YAML
 
   if [[ -n "$home_volume" ]]; then
-    printf '      - %s:/home/node\n' "$home_volume" >>"$EXTRA_COMPOSE_FILE"
-    printf '      - %s:/home/node/.openclaw\n' "$OPENCLAW_CONFIG_DIR" >>"$EXTRA_COMPOSE_FILE"
-    printf '      - %s:/home/node/.openclaw/workspace\n' "$OPENCLAW_WORKSPACE_DIR" >>"$EXTRA_COMPOSE_FILE"
+    home_mount="${home_volume}:/home/node"
+    if [[ "$home_volume" == *"/"* ]]; then
+      home_mount+="$OPENCLAW_BIND_MOUNT_OPTIONS"
+    fi
+    printf '      - %s\n' "$home_mount" >>"$EXTRA_COMPOSE_FILE"
+    printf '      - %s:/home/node/.openclaw%s\n' "$OPENCLAW_CONFIG_DIR" "$OPENCLAW_BIND_MOUNT_OPTIONS" >>"$EXTRA_COMPOSE_FILE"
+    printf '      - %s:/home/node/.openclaw/workspace%s\n' "$OPENCLAW_WORKSPACE_DIR" "$OPENCLAW_BIND_MOUNT_OPTIONS" >>"$EXTRA_COMPOSE_FILE"
   fi
 
   for mount in "$@"; do
@@ -121,7 +183,6 @@ fi
 for compose_file in "${COMPOSE_FILES[@]}"; do
   COMPOSE_ARGS+=("-f" "$compose_file")
 done
-COMPOSE_HINT="docker compose"
 for compose_file in "${COMPOSE_FILES[@]}"; do
   COMPOSE_HINT+=" -f ${compose_file}"
 done
@@ -174,10 +235,12 @@ upsert_env "$ENV_FILE" \
   OPENCLAW_IMAGE \
   OPENCLAW_EXTRA_MOUNTS \
   OPENCLAW_HOME_VOLUME \
-  OPENCLAW_DOCKER_APT_PACKAGES
+  OPENCLAW_DOCKER_APT_PACKAGES \
+  OPENCLAW_CONTAINER_ENGINE \
+  OPENCLAW_BIND_MOUNT_OPTIONS
 
-echo "==> Building Docker image: $IMAGE_NAME"
-docker build \
+echo "==> Building ${CONTAINER_ENGINE} image: $IMAGE_NAME"
+"$CONTAINER_ENGINE" build \
   --build-arg "OPENCLAW_DOCKER_APT_PACKAGES=${OPENCLAW_DOCKER_APT_PACKAGES}" \
   -t "$IMAGE_NAME" \
   -f "$ROOT_DIR/Dockerfile" \
@@ -192,7 +255,7 @@ echo "  - Gateway token: $OPENCLAW_GATEWAY_TOKEN"
 echo "  - Tailscale exposure: Off"
 echo "  - Install Gateway daemon: No"
 echo ""
-docker compose "${COMPOSE_ARGS[@]}" run --rm openclaw-cli onboard --no-install-daemon
+"${COMPOSE_CMD[@]}" "${COMPOSE_ARGS[@]}" run --rm openclaw-cli onboard --no-install-daemon
 
 echo ""
 echo "==> Provider setup (optional)"
@@ -206,7 +269,7 @@ echo "Docs: https://docs.openclaw.ai/channels"
 
 echo ""
 echo "==> Starting gateway"
-docker compose "${COMPOSE_ARGS[@]}" up -d openclaw-gateway
+"${COMPOSE_CMD[@]}" "${COMPOSE_ARGS[@]}" up -d openclaw-gateway
 
 echo ""
 echo "Gateway running with host port mapping."
