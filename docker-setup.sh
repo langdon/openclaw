@@ -61,6 +61,7 @@ fi
 OPENCLAW_CONFIG_DIR="${OPENCLAW_CONFIG_DIR:-$HOME/.openclaw}"
 OPENCLAW_WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-$HOME/.openclaw/workspace}"
 OPENCLAW_BIND_MOUNT_OPTIONS="${OPENCLAW_BIND_MOUNT_OPTIONS:-}"
+OPENCLAW_CONTAINER_USER="${OPENCLAW_CONTAINER_USER:-}"
 
 if [[ -z "$OPENCLAW_BIND_MOUNT_OPTIONS" && "$CONTAINER_ENGINE" == "podman" ]]; then
   os_name="$(uname -s 2>/dev/null || echo unknown)"
@@ -72,6 +73,15 @@ if [[ -z "$OPENCLAW_BIND_MOUNT_OPTIONS" && "$CONTAINER_ENGINE" == "podman" ]]; t
     if [[ "$selinux_mode" == "Enforcing" || "$selinux_mode" == "Permissive" ]]; then
       OPENCLAW_BIND_MOUNT_OPTIONS=":Z"
     fi
+  fi
+fi
+
+# Rootless Podman can fail to write bind mounts when container UID differs
+# from host UID. On Linux, default to keep-id style mapping unless overridden.
+if [[ -z "$OPENCLAW_CONTAINER_USER" && "$CONTAINER_ENGINE" == "podman" ]]; then
+  os_name="$(uname -s 2>/dev/null || echo unknown)"
+  if [[ "$os_name" == "Linux" ]]; then
+    OPENCLAW_CONTAINER_USER="$(id -u):$(id -g)"
   fi
 fi
 
@@ -89,6 +99,7 @@ export OPENCLAW_EXTRA_MOUNTS="$EXTRA_MOUNTS"
 export OPENCLAW_HOME_VOLUME="$HOME_VOLUME_NAME"
 export OPENCLAW_CONTAINER_ENGINE="$CONTAINER_ENGINE"
 export OPENCLAW_BIND_MOUNT_OPTIONS="$OPENCLAW_BIND_MOUNT_OPTIONS"
+export OPENCLAW_CONTAINER_USER="$OPENCLAW_CONTAINER_USER"
 
 if [[ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]]; then
   if command -v openssl >/dev/null 2>&1; then
@@ -111,12 +122,25 @@ write_extra_compose() {
   shift
   local mount
   local home_mount
+  local has_mounts=false
+  if [[ -n "$home_volume" || $# -gt 0 ]]; then
+    has_mounts=true
+  fi
 
   cat >"$EXTRA_COMPOSE_FILE" <<'YAML'
 services:
   openclaw-gateway:
+YAML
+
+  if [[ -n "$OPENCLAW_CONTAINER_USER" ]]; then
+    printf '    user: "%s"\n' "$OPENCLAW_CONTAINER_USER" >>"$EXTRA_COMPOSE_FILE"
+  fi
+
+  if [[ "$has_mounts" == true ]]; then
+    cat >>"$EXTRA_COMPOSE_FILE" <<'YAML'
     volumes:
 YAML
+  fi
 
   if [[ -n "$home_volume" ]]; then
     home_mount="${home_volume}:/home/node"
@@ -134,8 +158,17 @@ YAML
 
   cat >>"$EXTRA_COMPOSE_FILE" <<'YAML'
   openclaw-cli:
+YAML
+
+  if [[ -n "$OPENCLAW_CONTAINER_USER" ]]; then
+    printf '    user: "%s"\n' "$OPENCLAW_CONTAINER_USER" >>"$EXTRA_COMPOSE_FILE"
+  fi
+
+  if [[ "$has_mounts" == true ]]; then
+    cat >>"$EXTRA_COMPOSE_FILE" <<'YAML'
     volumes:
 YAML
+  fi
 
   if [[ -n "$home_volume" ]]; then
     home_mount="${home_volume}:/home/node"
@@ -171,7 +204,7 @@ if [[ -n "$EXTRA_MOUNTS" ]]; then
   done
 fi
 
-if [[ -n "$HOME_VOLUME_NAME" || ${#VALID_MOUNTS[@]} -gt 0 ]]; then
+if [[ -n "$HOME_VOLUME_NAME" || ${#VALID_MOUNTS[@]} -gt 0 || -n "$OPENCLAW_CONTAINER_USER" ]]; then
   # Bash 3.2 + nounset treats "${array[@]}" on an empty array as unbound.
   if [[ ${#VALID_MOUNTS[@]} -gt 0 ]]; then
     write_extra_compose "$HOME_VOLUME_NAME" "${VALID_MOUNTS[@]}"
@@ -237,7 +270,8 @@ upsert_env "$ENV_FILE" \
   OPENCLAW_HOME_VOLUME \
   OPENCLAW_DOCKER_APT_PACKAGES \
   OPENCLAW_CONTAINER_ENGINE \
-  OPENCLAW_BIND_MOUNT_OPTIONS
+  OPENCLAW_BIND_MOUNT_OPTIONS \
+  OPENCLAW_CONTAINER_USER
 
 echo "==> Building ${CONTAINER_ENGINE} image: $IMAGE_NAME"
 "$CONTAINER_ENGINE" build \

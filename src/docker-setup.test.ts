@@ -243,6 +243,7 @@ describe("docker-setup.sh", () => {
     expect(envFile).toContain("OPENCLAW_CONTAINER_ENGINE=podman");
     if (process.platform === "linux") {
       expect(envFile).toContain("OPENCLAW_BIND_MOUNT_OPTIONS=:Z");
+      expect(envFile).toMatch(/OPENCLAW_CONTAINER_USER=\d+:\d+/);
     }
 
     const log = await readFile(sandbox.logPath, "utf8");
@@ -254,6 +255,32 @@ describe("docker-setup.sh", () => {
       const extraCompose = await readFile(join(sandbox.rootDir, "docker-compose.extra.yml"), "utf8");
       expect(extraCompose).toContain(":/home/node:Z");
       expect(extraCompose).toContain(":/home/node/.openclaw:Z");
+      expect(extraCompose).toMatch(/user: "\d+:\d+"/);
     }
+  });
+
+  it("writes a user-only extra compose file without empty volumes keys", async () => {
+    const sandbox = await createDockerSetupSandbox();
+    await writePodmanStub(sandbox.binDir, sandbox.logPath);
+    await writeGetenforceStub(sandbox.binDir, "Enforcing");
+    const env = createEnv(sandbox, {
+      OPENCLAW_CONTAINER_ENGINE: "podman",
+      OPENCLAW_EXTRA_MOUNTS: "",
+      OPENCLAW_HOME_VOLUME: "",
+      OPENCLAW_BIND_MOUNT_OPTIONS: "",
+      OPENCLAW_CONTAINER_USER: "1001:1001",
+    });
+
+    const result = spawnSync("bash", [sandbox.scriptPath], {
+      cwd: sandbox.rootDir,
+      env,
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(0);
+
+    const extraCompose = await readFile(join(sandbox.rootDir, "docker-compose.extra.yml"), "utf8");
+    expect(extraCompose).toContain('user: "1001:1001"');
+    expect(extraCompose).not.toMatch(/^\s+volumes:\s*$/m);
   });
 });
