@@ -81,7 +81,18 @@ fi
 if [[ -z "$OPENCLAW_CONTAINER_USER" && "$CONTAINER_ENGINE" == "podman" ]]; then
   os_name="$(uname -s 2>/dev/null || echo unknown)"
   if [[ "$os_name" == "Linux" ]]; then
-    OPENCLAW_CONTAINER_USER="$(id -u):$(id -g)"
+    podman_rootless=""
+    if podman_rootless="$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null)"; then
+      if [[ "$podman_rootless" == "true" ]]; then
+        # In rootless Podman, container uid 0 maps to the invoking host user.
+        # This avoids bind-mount write failures from uid remapping.
+        OPENCLAW_CONTAINER_USER="0:0"
+      else
+        OPENCLAW_CONTAINER_USER="$(id -u):$(id -g)"
+      fi
+    else
+      OPENCLAW_CONTAINER_USER="$(id -u):$(id -g)"
+    fi
   fi
 fi
 
