@@ -96,6 +96,31 @@ exit 0
   await writeFile(join(binDir, "podman"), stub, { mode: 0o755 });
 }
 
+async function writePodmanInfoFailStub(binDir: string, logPath: string) {
+  const stub = `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "info" ]]; then
+  exit 1
+fi
+if [[ "\${1:-}" == "compose" && "\${2:-}" == "version" ]]; then
+  exit 0
+fi
+if [[ "\${1:-}" == "build" ]]; then
+  echo "build $*" >>"$DOCKER_STUB_LOG"
+  exit 0
+fi
+if [[ "\${1:-}" == "compose" ]]; then
+  echo "compose $*" >>"$DOCKER_STUB_LOG"
+  exit 0
+fi
+echo "unknown $*" >>"$DOCKER_STUB_LOG"
+exit 0
+`;
+  await mkdir(binDir, { recursive: true });
+  await writeFile(join(binDir, "podman"), stub, { mode: 0o755 });
+  await writeFile(logPath, "");
+}
+
 async function createDockerSetupSandbox(): Promise<DockerSetupSandbox> {
   const rootDir = await mkdtemp(join(tmpdir(), "openclaw-docker-setup-"));
   const scriptPath = join(rootDir, "docker-setup.sh");
@@ -312,6 +337,33 @@ describe("docker-setup.sh", () => {
   it("defaults to user 0:0 for rootless Podman on Linux", async () => {
     const sandbox = await createDockerSetupSandbox();
     await writePodmanInfoRootlessStub(sandbox.binDir, "true");
+    await writeGetenforceStub(sandbox.binDir, "Enforcing");
+    const env = createEnv(sandbox, {
+      OPENCLAW_CONTAINER_ENGINE: "podman",
+      OPENCLAW_EXTRA_MOUNTS: "",
+      OPENCLAW_HOME_VOLUME: "",
+      OPENCLAW_BIND_MOUNT_OPTIONS: "",
+      OPENCLAW_CONTAINER_USER: "",
+    });
+
+    const result = spawnSync("bash", [sandbox.scriptPath], {
+      cwd: sandbox.rootDir,
+      env,
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(0);
+    if (process.platform === "linux") {
+      const envFile = await readFile(join(sandbox.rootDir, ".env"), "utf8");
+      expect(envFile).toContain("OPENCLAW_CONTAINER_USER=0:0");
+      const extraCompose = await readFile(join(sandbox.rootDir, "docker-compose.extra.yml"), "utf8");
+      expect(extraCompose).toContain('user: "0:0"');
+    }
+  });
+
+  it("defaults to user 0:0 for Podman on Linux when podman info probe fails", async () => {
+    const sandbox = await createDockerSetupSandbox();
+    await writePodmanInfoFailStub(sandbox.binDir, sandbox.logPath);
     await writeGetenforceStub(sandbox.binDir, "Enforcing");
     const env = createEnv(sandbox, {
       OPENCLAW_CONTAINER_ENGINE: "podman",

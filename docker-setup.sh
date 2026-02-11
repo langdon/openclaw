@@ -81,16 +81,12 @@ fi
 if [[ -z "$OPENCLAW_CONTAINER_USER" && "$CONTAINER_ENGINE" == "podman" ]]; then
   os_name="$(uname -s 2>/dev/null || echo unknown)"
   if [[ "$os_name" == "Linux" ]]; then
-    podman_rootless=""
-    if podman_rootless="$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null)"; then
-      if [[ "$podman_rootless" == "true" ]]; then
-        # In rootless Podman, container uid 0 maps to the invoking host user.
-        # This avoids bind-mount write failures from uid remapping.
-        OPENCLAW_CONTAINER_USER="0:0"
-      else
-        OPENCLAW_CONTAINER_USER="$(id -u):$(id -g)"
-      fi
-    else
+    # Safe default for rootless Podman (common on Fedora): uid 0 in userns maps
+    # to the invoking host user and avoids bind-mount write failures.
+    OPENCLAW_CONTAINER_USER="0:0"
+    podman_rootless="$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]' || true)"
+    if [[ "$podman_rootless" == "false" ]]; then
+      # Rootful Podman does not use the same userns mapping strategy.
       OPENCLAW_CONTAINER_USER="$(id -u):$(id -g)"
     fi
   fi
